@@ -5,7 +5,7 @@ import {
   getRecommendationDecision,
   type DiagnosticAnswers,
   type ScenarioInput,
-} from "./inteligenciaScenario.ts";
+} from "./inteligenciaScenario.js";
 import {
   AiReportCopySchema,
   MiniReportSchema,
@@ -14,8 +14,8 @@ import {
   getAiCopySemanticError,
   mergeAiCopy,
   validateReportSemantics,
-} from "./inteligenciaReport.ts";
-import miniReportHandler from "../../api/mini-relatorio.ts";
+} from "./inteligenciaReport.js";
+import miniReportHandler from "../../api/mini-relatorio.js";
 
 function decide(input: ScenarioInput, answers: DiagnosticAnswers) {
   return getRecommendationDecision(calculateScenario(input), answers);

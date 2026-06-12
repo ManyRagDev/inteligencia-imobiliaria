@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023", "DOM"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "outDir": ".test-dist",
+    "rootDir": ".",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmitOnError": true,
+    "types": ["node"]
+  },
+  "include": [
+    "api/mini-relatorio.ts",
+    "src/lib/inteligenciaReport.ts",
+    "src/lib/inteligenciaScenario.ts",
+    "src/lib/inteligenciaScenario.test.ts"
+  ]
+}

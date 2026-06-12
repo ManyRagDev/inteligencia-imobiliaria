@@ -8,7 +8,7 @@
     "dev:full": "vercel dev",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node --experimental-strip-types --test src/lib/inteligenciaScenario.test.ts"
+    "test": "tsc -p tsconfig.test.json && node --test .test-dist/src/lib/inteligenciaScenario.test.js"
   },
   "dependencies": {
     "framer-motion": "^12.29.0",

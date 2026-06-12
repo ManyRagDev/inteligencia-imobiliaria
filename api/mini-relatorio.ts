@@ -4,7 +4,7 @@ import {
   calculateScenario,
   getRecommendationDecision,
   type DiagnosticAnswers,
-} from "../src/lib/inteligenciaScenario.ts";
+} from "../src/lib/inteligenciaScenario.js";
 import {
   AiReportCopySchema,
   REPORT_SYSTEM_PROMPT,
@@ -13,7 +13,7 @@ import {
   getAiCopySemanticError,
   mergeAiCopy,
   type ReportFallbackReason,
-} from "../src/lib/inteligenciaReport.ts";
+} from "../src/lib/inteligenciaReport.js";
 
 interface ApiRequest {
   method?: string;

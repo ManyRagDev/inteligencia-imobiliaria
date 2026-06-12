@@ -8,7 +8,7 @@ import {
   type DiagnosticAnswers,
   type RecommendationDecision,
   type ScenarioResult,
-} from "./inteligenciaScenario.ts";
+} from "./inteligenciaScenario.js";
 
 export const MiniReportSchema = z
   .object({
