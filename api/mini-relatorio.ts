@@ -1,20 +1,18 @@
-import { z } from "zod";
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import {
   calculateScenario,
   getRecommendationDecision,
   type DiagnosticAnswers,
 } from "../src/lib/inteligenciaScenario.ts";
 import {
-  MiniReportSchema,
+  AiReportCopySchema,
   REPORT_SYSTEM_PROMPT,
   buildDeterministicReport,
   buildModelContext,
-  getReportSemanticError,
-  getUnexpectedReportNumbers,
+  getAiCopySemanticError,
+  mergeAiCopy,
   type ReportFallbackReason,
-  type ReportDebugStep,
-  type ReportDebugTrace,
 } from "../src/lib/inteligenciaReport.ts";
 
 interface ApiRequest {
@@ -31,9 +29,9 @@ interface ApiResponse {
 
 const RequestSchema = z
   .object({
-    propertyValue: z.number().min(150000).max(1200000),
-    downPayment: z.number().min(0).max(1200000),
-    monthlyIncome: z.number().min(3000).max(50000),
+    propertyValue: z.number().finite().positive().max(100_000_000),
+    downPayment: z.number().finite().min(0).max(100_000_000),
+    monthlyIncome: z.number().finite().positive().max(10_000_000),
     moment: z.enum(["entendendo", "organizando", "proximos_meses", "procurando", "negociando"]),
     mainNeed: z.enum([
       "financiamento",
@@ -57,41 +55,45 @@ const RequestSchema = z
     ]),
     supportPreference: z.enum(["autonomia", "orientacao", "acompanhamento"]).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    if (value.downPayment > value.propertyValue) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["downPayment"],
+        message: "A entrada não pode superar o valor do imóvel.",
+      });
+    }
+  });
 
-const reportJsonSchema = {
+const aiCopyJsonSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
     headline: { type: "string" },
     opening: { type: "string" },
-    financial_reading: { type: "string" },
-    main_discovery: { type: "string" },
-    variables_to_investigate: { type: "string" },
-    next_steps: {
-      type: "array",
-      items: { type: "string" },
-    },
-    recommendation_reason: { type: "string" },
     autonomy_message: { type: "string" },
-    educational_notice: { type: "string" },
   },
-  required: [
-    "headline",
-    "opening",
-    "financial_reading",
-    "main_discovery",
-    "variables_to_investigate",
-    "next_steps",
-    "recommendation_reason",
-    "autonomy_message",
-    "educational_notice",
-  ],
+  required: ["headline", "opening", "autonomy_message"],
 } as const;
 
 const requestsByIp = new Map<string, { count: number; resetAt: number }>();
 const RATE_WINDOW_MS = 60_000;
-const RATE_LIMIT = 12;
+const RATE_LIMIT = 10;
+const MAX_REQUEST_BYTES = 5_000;
+const MAX_PROVIDER_RESPONSE_BYTES = 20_000;
+
+function firstHeader(value: string | string[] | undefined) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function getClientIp(request: ApiRequest) {
+  return (
+    firstHeader(request.headers["x-vercel-forwarded-for"])?.split(",")[0]?.trim() ||
+    firstHeader(request.headers["x-real-ip"])?.trim() ||
+    "unknown"
+  );
+}
 
 function isRateLimited(ip: string) {
   const now = Date.now();
@@ -104,6 +106,21 @@ function isRateLimited(ip: string) {
   return current.count > RATE_LIMIT;
 }
 
+function hasAllowedOrigin(request: ApiRequest) {
+  const origin = firstHeader(request.headers.origin);
+  if (!origin) return true;
+
+  const forwardedHost = firstHeader(request.headers["x-forwarded-host"]);
+  const host = forwardedHost || firstHeader(request.headers.host);
+  if (!host) return false;
+
+  try {
+    return new URL(origin).host === host;
+  } catch {
+    return false;
+  }
+}
+
 function parseBody(body: unknown) {
   if (typeof body === "string") return JSON.parse(body);
   return body;
@@ -113,11 +130,7 @@ class ReportGenerationError extends Error {
   readonly reason: ReportFallbackReason;
   readonly providerStatus?: number;
 
-  constructor(
-    reason: ReportFallbackReason,
-    message: string,
-    providerStatus?: number
-  ) {
+  constructor(reason: ReportFallbackReason, message: string, providerStatus?: number) {
     super(message);
     this.reason = reason;
     this.providerStatus = providerStatus;
@@ -128,51 +141,37 @@ export default async function handler(request: ApiRequest, response: ApiResponse
   const requestId = randomUUID();
   const startedAt = Date.now();
   const model = process.env.GROQ_MODEL || "openai/gpt-oss-120b";
-  // TEMP_GROQ_DEBUG_START: remove this trace block with the temporary on-page inspector.
-  const debugHeader = request.headers["x-report-debug"];
-  const debugEnabled =
-    process.env.GROQ_DEBUG === "1" ||
-    (Array.isArray(debugHeader) ? debugHeader[0] : debugHeader) === "1";
-  const debugSteps: ReportDebugStep[] = [];
-  const addDebugStep = (
-    label: string,
-    status: ReportDebugStep["status"],
-    data?: unknown
-  ) => {
-    if (!debugEnabled) return;
-    debugSteps.push({
-      atMs: Date.now() - startedAt,
-      label,
-      status,
-      data,
-    });
-  };
-  const getDebugTrace = (): ReportDebugTrace | undefined =>
-    debugEnabled
-      ? {
-          temporaryMarker: "TEMP_GROQ_DEBUG",
-          requestId,
-          startedAt: new Date(startedAt).toISOString(),
-          steps: debugSteps,
-        }
-      : undefined;
-  // TEMP_GROQ_DEBUG_END
-  response.setHeader("Cache-Control", "no-store");
+
+  response.setHeader("Cache-Control", "no-store, max-age=0");
+  response.setHeader("Content-Type", "application/json; charset=utf-8");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("Referrer-Policy", "no-referrer");
   response.setHeader("X-Request-Id", requestId);
+  response.setHeader("Vary", "Origin");
 
   if (request.method !== "POST") {
+    response.setHeader("Allow", "POST");
     return response.status(405).json({ error: "Método não permitido." });
   }
 
-  const forwarded = request.headers["x-forwarded-for"];
-  const ip = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(",")[0]?.trim() || "unknown";
+  if (!hasAllowedOrigin(request)) {
+    return response.status(403).json({ error: "Origem não permitida." });
+  }
+
+  const contentType = firstHeader(request.headers["content-type"])?.toLowerCase() || "";
+  if (!contentType.startsWith("application/json")) {
+    return response.status(415).json({ error: "Use Content-Type application/json." });
+  }
+
+  const ip = getClientIp(request);
   if (isRateLimited(ip)) {
+    response.setHeader("Retry-After", "60");
     return response.status(429).json({ error: "Muitas tentativas. Aguarde um minuto." });
   }
 
   let parsedBody: unknown;
   try {
-    if (typeof request.body === "string" && request.body.length > 5_000) {
+    if (typeof request.body === "string" && Buffer.byteLength(request.body, "utf8") > MAX_REQUEST_BYTES) {
       return response.status(413).json({ error: "Corpo da requisição muito grande." });
     }
     parsedBody = parseBody(request.body);
@@ -182,13 +181,9 @@ export default async function handler(request: ApiRequest, response: ApiResponse
 
   const validation = RequestSchema.safeParse(parsedBody);
   if (!validation.success) {
+    console.warn(JSON.stringify({ event: "mini_report_invalid_input", requestId, ip }));
     return response.status(400).json({ error: "Dados do diagnóstico inválidos." });
   }
-  addDebugStep("Requisição recebida pelo endpoint", "info", {
-    method: request.method,
-    path: "/api/mini-relatorio",
-    body: validation.data,
-  });
 
   const { propertyValue, downPayment, monthlyIncome, ...answerData } = validation.data;
   const answers = answerData as DiagnosticAnswers;
@@ -197,17 +192,9 @@ export default async function handler(request: ApiRequest, response: ApiResponse
   const fallback = buildDeterministicReport(scenario, answers, decision);
   const context = buildModelContext(scenario, answers, decision);
   const apiKey = process.env.GROQ_API_KEY;
-  addDebugStep("Cenário e recomendação calculados localmente", "success", {
-    scenario,
-    decision,
-    deterministicFallback: fallback,
-  });
 
   if (!apiKey) {
     const durationMs = Date.now() - startedAt;
-    addDebugStep("Chamada à Groq não realizada", "error", {
-      reason: "missing_api_key",
-    });
     console.warn(
       JSON.stringify({
         event: "mini_report_fallback",
@@ -227,7 +214,6 @@ export default async function handler(request: ApiRequest, response: ApiResponse
         durationMs,
         fallbackReason: "missing_api_key",
       },
-      debug: getDebugTrace(),
     });
   }
 
@@ -235,34 +221,25 @@ export default async function handler(request: ApiRequest, response: ApiResponse
   const timeout = setTimeout(() => controller.abort(), 8_000);
   const groqPayload = {
     model,
-    temperature: 0.35,
+    temperature: 0.2,
     reasoning_effort: "low",
-    max_completion_tokens: 3000,
+    max_completion_tokens: 800,
     messages: [
       { role: "system", content: REPORT_SYSTEM_PROMPT },
       {
         role: "user",
-        content: `Escreva o relatório usando somente este contexto:\n${JSON.stringify(context)}`,
+        content: JSON.stringify({ controlled_context: context }),
       },
     ],
     response_format: {
       type: "json_schema",
       json_schema: {
-        name: "pinheiro_azul_mini_report",
+        name: "pinheiro_azul_safe_copy",
         strict: true,
-        schema: reportJsonSchema,
+        schema: aiCopyJsonSchema,
       },
     },
   };
-  addDebugStep("Payload preparado para a Groq", "info", {
-    url: "https://api.groq.com/openai/v1/chat/completions",
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: "[REDACTED]",
-    },
-    body: groqPayload,
-  });
 
   try {
     const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -275,23 +252,6 @@ export default async function handler(request: ApiRequest, response: ApiResponse
       body: JSON.stringify(groqPayload),
     });
 
-    const groqResponseText = await groqResponse.text();
-    let groqResponseBody: unknown = groqResponseText;
-    try {
-      groqResponseBody = JSON.parse(groqResponseText);
-    } catch {
-      // Keep the raw provider response in the temporary trace.
-    }
-    addDebugStep(
-      "Resposta HTTP recebida da Groq",
-      groqResponse.ok ? "success" : "error",
-      {
-        status: groqResponse.status,
-        statusText: groqResponse.statusText,
-        body: groqResponseBody,
-      }
-    );
-
     if (!groqResponse.ok) {
       throw new ReportGenerationError(
         "groq_http_error",
@@ -300,63 +260,60 @@ export default async function handler(request: ApiRequest, response: ApiResponse
       );
     }
 
+    const groqResponseText = await groqResponse.text();
+    if (Buffer.byteLength(groqResponseText, "utf8") > MAX_PROVIDER_RESPONSE_BYTES) {
+      throw new ReportGenerationError("invalid_json", "Resposta do provedor excedeu o limite.");
+    }
+
+    let groqResponseBody: unknown;
+    try {
+      groqResponseBody = JSON.parse(groqResponseText);
+    } catch {
+      throw new ReportGenerationError("invalid_json", "JSON inválido retornado pela Groq.");
+    }
+
     const completion = groqResponseBody as {
       choices?: Array<{ message?: { content?: string | null } }>;
       usage?: unknown;
     };
     const content = completion.choices?.[0]?.message?.content;
     if (!content) {
-      throw new ReportGenerationError("empty_response", "Resposta vazia");
+      throw new ReportGenerationError("empty_response", "Resposta vazia.");
     }
 
-    let parsedReport: unknown;
+    let parsedCopy: unknown;
     try {
-      parsedReport = JSON.parse(content);
-      addDebugStep("Conteúdo JSON da resposta interpretado", "success", parsedReport);
+      parsedCopy = JSON.parse(content);
     } catch {
-      addDebugStep("Falha ao interpretar o conteúdo como JSON", "error", {
-        content,
-      });
-      throw new ReportGenerationError("invalid_json", "JSON inválido retornado pela Groq");
+      throw new ReportGenerationError("invalid_json", "Conteúdo inválido retornado pela Groq.");
     }
 
-    const reportValidation = MiniReportSchema.safeParse(parsedReport);
-    if (!reportValidation.success) {
-      addDebugStep("Validação estrutural Zod reprovada", "error", {
-        issues: reportValidation.error.issues,
-      });
+    const copyValidation = AiReportCopySchema.safeParse(parsedCopy);
+    if (!copyValidation.success) {
       throw new ReportGenerationError(
         "invalid_report_schema",
-        "Resposta fora do contrato do relatório"
+        "Resposta fora do contrato de redação."
       );
     }
-    const report = reportValidation.data;
-    addDebugStep("Validação estrutural Zod aprovada", "success");
-    const semanticError = getReportSemanticError(report, context);
+
+    const semanticError = getAiCopySemanticError(copyValidation.data, context);
     if (semanticError) {
-      addDebugStep("Guardrails semânticos reprovaram a resposta", "error", {
-        reason: semanticError,
-        unexpectedNumbers: getUnexpectedReportNumbers(report, context),
-      });
-      if (process.env.GROQ_DEBUG === "1") {
-        console.error(
-          "[mini-relatorio] Números inesperados:",
-          getUnexpectedReportNumbers(report, context)
-        );
-      }
+      console.warn(
+        JSON.stringify({
+          event: "mini_report_guardrail",
+          requestId,
+          reason: semanticError,
+          feasibility: scenario.feasibility,
+        })
+      );
       throw new ReportGenerationError(
         "semantic_guardrail",
-        `Resposta reprovada pelos guardrails semânticos: ${semanticError}`
+        `Redação externa reprovada: ${semanticError}`
       );
     }
-    addDebugStep("Guardrails semânticos aprovados", "success");
 
+    const report = mergeAiCopy(fallback, copyValidation.data);
     const durationMs = Date.now() - startedAt;
-    addDebugStep("Relatório Groq entregue ao frontend", "success", {
-      source: "groq",
-      durationMs,
-      usage: completion.usage,
-    });
     console.info(
       JSON.stringify({
         event: "mini_report_success",
@@ -364,6 +321,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
         source: "groq",
         model,
         durationMs,
+        feasibility: scenario.feasibility,
       })
     );
     return response.status(200).json({
@@ -377,7 +335,6 @@ export default async function handler(request: ApiRequest, response: ApiResponse
         model,
         durationMs,
       },
-      debug: getDebugTrace(),
     });
   } catch (error) {
     const reason: ReportFallbackReason =
@@ -391,12 +348,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
     const providerStatus =
       error instanceof ReportGenerationError ? error.providerStatus : undefined;
     const durationMs = Date.now() - startedAt;
-    addDebugStep("Fallback determinístico entregue ao frontend", "error", {
-      reason,
-      providerStatus,
-      durationMs,
-      message: error instanceof Error ? error.message : "Erro desconhecido",
-    });
+
     console.error(
       JSON.stringify({
         event: "mini_report_fallback",
@@ -404,7 +356,7 @@ export default async function handler(request: ApiRequest, response: ApiResponse
         reason,
         providerStatus,
         durationMs,
-        message: error instanceof Error ? error.message : "Erro desconhecido",
+        feasibility: scenario.feasibility,
       })
     );
     return response.status(200).json({
@@ -420,7 +372,6 @@ export default async function handler(request: ApiRequest, response: ApiResponse
         fallbackReason: reason,
         providerStatus,
       },
-      debug: getDebugTrace(),
     });
   } finally {
     clearTimeout(timeout);

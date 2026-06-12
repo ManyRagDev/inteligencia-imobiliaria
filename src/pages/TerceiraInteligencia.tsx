@@ -232,7 +232,7 @@ export default function TerceiraInteligencia() {
                     label="Renda familiar mensal"
                     hint="Considere a renda bruta de quem participaria do financiamento."
                     value={monthlyIncome}
-                    min={3000}
+                    min={1000}
                     max={50000}
                     step={500}
                     quickStep={1000}

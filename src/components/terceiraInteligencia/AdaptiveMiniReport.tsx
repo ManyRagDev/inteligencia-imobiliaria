@@ -31,9 +31,7 @@ import {
 import {
   buildDeterministicReport,
   type MiniReport,
-  type MiniReportAudit,
   type MiniReportResponse,
-  type ReportDebugTrace,
   type ReportSource,
 } from "@/lib/inteligenciaReport";
 
@@ -46,99 +44,6 @@ interface AdaptiveMiniReportProps {
 
 type FlowStep = "moment" | "need" | "support" | "report";
 type GenerationState = "idle" | "generating" | "success" | "fallback";
-const reportDebugEnabled = import.meta.env.DEV || import.meta.env.VITE_REPORT_DEBUG === "1";
-
-// TEMP_GROQ_DEBUG_START: remove this component with the temporary on-page Groq inspector.
-function GroqDebugPanel({ traces }: { traces: ReportDebugTrace[] }) {
-  if (!reportDebugEnabled || traces.length === 0) return null;
-
-  return (
-    <section className="border-2 border-dashed border-[#e43d30] bg-[#fff7f5] p-4 sm:p-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <p className="text-[9px] font-black uppercase tracking-[0.18em] text-[#e43d30]">
-            TEMP_GROQ_DEBUG
-          </p>
-          <h4 className="mt-2 text-lg font-black uppercase">Log temporário da Groq</h4>
-          <p className="mt-2 max-w-2xl text-xs leading-relaxed text-[#415064]">
-            Exibe dados financeiros informados, prompt, payload e resposta do provedor.
-            A chave de API permanece removida.
-          </p>
-        </div>
-        <span className="border border-[#06192c] bg-white px-3 py-2 font-mono text-[10px]">
-          {traces.length} chamada{traces.length === 1 ? "" : "s"}
-        </span>
-      </div>
-
-      <div className="mt-5 space-y-3">
-        {traces.map((trace, traceIndex) => {
-          const lastStep = trace.steps[trace.steps.length - 1];
-          return (
-            <details
-              key={trace.requestId}
-              open={traceIndex === 0}
-              className="border border-[#06192c] bg-white"
-            >
-              <summary className="cursor-pointer list-none px-4 py-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="font-mono text-[10px] font-bold">
-                    #{traces.length - traceIndex} · {trace.requestId}
-                  </span>
-                  <span
-                    className={`px-2 py-1 text-[9px] font-black uppercase ${
-                      lastStep?.status === "success"
-                        ? "bg-[#28c7ba]"
-                        : lastStep?.status === "error"
-                          ? "bg-[#e43d30] text-white"
-                          : "bg-[#f3d35b]"
-                    }`}
-                  >
-                    {lastStep?.label || "Em processamento"}
-                  </span>
-                </div>
-                <p className="mt-2 font-mono text-[9px] text-[#415064]">
-                  {trace.startedAt} · {trace.steps.length} etapas
-                </p>
-              </summary>
-
-              <div className="border-t border-[#06192c] p-3 sm:p-4">
-                <ol className="space-y-3">
-                  {trace.steps.map((debugStep, stepIndex) => (
-                    <li key={`${debugStep.atMs}-${debugStep.label}-${stepIndex}`}>
-                      <details className="border border-[#aab3bd] bg-[#f8f8f6]">
-                        <summary className="cursor-pointer px-3 py-2 font-mono text-[10px]">
-                          <span className="font-black">+{debugStep.atMs}ms</span>
-                          {" · "}
-                          <span
-                            className={
-                              debugStep.status === "success"
-                                ? "text-[#08776e]"
-                                : debugStep.status === "error"
-                                  ? "text-[#c02d23]"
-                                  : "text-[#415064]"
-                            }
-                          >
-                            {debugStep.label}
-                          </span>
-                        </summary>
-                        {debugStep.data !== undefined && (
-                          <pre className="max-h-[420px] overflow-auto border-t border-[#aab3bd] bg-[#06192c] p-3 text-[10px] leading-relaxed text-[#dce8f2]">
-                            {JSON.stringify(debugStep.data, null, 2)}
-                          </pre>
-                        )}
-                      </details>
-                    </li>
-                  ))}
-                </ol>
-              </div>
-            </details>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
-// TEMP_GROQ_DEBUG_END
 
 function SelectionCard({
   label,
@@ -222,9 +127,6 @@ export function AdaptiveMiniReport({ result, reduceMotion }: AdaptiveMiniReportP
   const [generationState, setGenerationState] = useState<GenerationState>("idle");
   const [report, setReport] = useState<MiniReport>();
   const [reportSource, setReportSource] = useState<ReportSource>("deterministic");
-  const [reportAudit, setReportAudit] = useState<MiniReportAudit>();
-  // TEMP_GROQ_DEBUG: remove this state with the temporary on-page Groq inspector.
-  const [groqDebugTraces, setGroqDebugTraces] = useState<ReportDebugTrace[]>([]);
   const generationIdRef = useRef(0);
 
   useEffect(() => {
@@ -235,7 +137,6 @@ export function AdaptiveMiniReport({ result, reduceMotion }: AdaptiveMiniReportP
     setSupportPreference(undefined);
     setGenerationState("idle");
     setReport(undefined);
-    setReportAudit(undefined);
   }, [result.propertyValue, result.consideredDownPayment, result.monthlyIncome]);
 
   const partialAnswers = { moment, mainNeed, supportPreference };
@@ -251,7 +152,6 @@ export function AdaptiveMiniReport({ result, reduceMotion }: AdaptiveMiniReportP
     setStep("report");
     setGenerationState("generating");
     setReport(undefined);
-    setReportAudit(undefined);
 
     try {
       const requestPayload = {
@@ -264,7 +164,6 @@ export function AdaptiveMiniReport({ result, reduceMotion }: AdaptiveMiniReportP
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          ...(reportDebugEnabled ? { "X-Report-Debug": "1" } : {}),
         },
         body: JSON.stringify(requestPayload),
       });
@@ -275,11 +174,6 @@ export function AdaptiveMiniReport({ result, reduceMotion }: AdaptiveMiniReportP
       console.info("[mini-relatorio]", data.audit);
       setReport(data.report);
       setReportSource(data.source);
-      setReportAudit(data.audit);
-      // TEMP_GROQ_DEBUG: remove this history update with the temporary inspector.
-      if (data.debug) {
-        setGroqDebugTraces((current) => [data.debug!, ...current].slice(0, 10));
-      }
       setGenerationState(data.source === "groq" ? "success" : "fallback");
     } catch (error) {
       if (generationId !== generationIdRef.current) return;
@@ -290,32 +184,8 @@ export function AdaptiveMiniReport({ result, reduceMotion }: AdaptiveMiniReportP
         fallbackReason: "client_request_error",
       };
       console.error("[mini-relatorio]", clientAudit, error);
-      // TEMP_GROQ_DEBUG_START: preserve client-side failures in the temporary inspector.
-      if (reportDebugEnabled) {
-        const clientDebugTrace: ReportDebugTrace = {
-          temporaryMarker: "TEMP_GROQ_DEBUG",
-          requestId: clientAudit.requestId,
-          startedAt: new Date().toISOString(),
-          steps: [
-            {
-              atMs: 0,
-              label: "Falha no navegador antes de receber resposta válida da API",
-              status: "error",
-              data: {
-                endpoint: "/api/mini-relatorio",
-                message: error instanceof Error ? error.message : "Erro desconhecido",
-              },
-            },
-          ],
-        };
-        setGroqDebugTraces((current) =>
-          [clientDebugTrace, ...current].slice(0, 10)
-        );
-      }
-      // TEMP_GROQ_DEBUG_END
       setReport(localReport);
       setReportSource("deterministic");
-      setReportAudit(clientAudit);
       setGenerationState("fallback");
     }
   };
@@ -523,23 +393,6 @@ export function AdaptiveMiniReport({ result, reduceMotion }: AdaptiveMiniReportP
                   {reportSource === "groq" && <Sparkles size={13} />}
                   Seu mini relatório gratuito
                 </span>
-                {reportDebugEnabled && reportAudit && (
-                  <div className="mt-3 border border-[#06192c] bg-white/80 px-3 py-2 font-mono text-[9px] leading-relaxed">
-                    Origem: {reportAudit.source}
-                    {" | "}ID: {reportAudit.requestId}
-                    {" | "}{reportAudit.durationMs}ms
-                    {reportAudit.fallbackReason && (
-                      <>
-                        {" | "}Fallback: {reportAudit.fallbackReason}
-                      </>
-                    )}
-                    {reportAudit.providerStatus && (
-                      <>
-                        {" | "}HTTP Groq: {reportAudit.providerStatus}
-                      </>
-                    )}
-                  </div>
-                )}
                 <h3 className="mt-6 text-3xl font-black uppercase leading-[0.95]">
                   {report.headline}
                 </h3>
@@ -620,8 +473,6 @@ export function AdaptiveMiniReport({ result, reduceMotion }: AdaptiveMiniReportP
                 </div>
               </div>
 
-              {/* TEMP_GROQ_DEBUG: remove this panel when the Groq audit is no longer needed. */}
-              <GroqDebugPanel traces={groqDebugTraces} />
             </motion.div>
           )}
         </AnimatePresence>

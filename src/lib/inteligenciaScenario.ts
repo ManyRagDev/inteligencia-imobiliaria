@@ -27,6 +27,13 @@ export type MainNeed =
 
 export type SupportPreference = "autonomia" | "orientacao" | "acompanhamento";
 export type ScenarioLevel = "exploratorio" | "preparacao" | "busca";
+export type ScenarioFeasibility =
+  | "invalid"
+  | "no_financing_needed"
+  | "severely_incompatible"
+  | "needs_major_adjustment"
+  | "needs_confirmation"
+  | "within_reference";
 export type RecommendationClass =
   | "exploracao"
   | "formacao_entrada"
@@ -58,6 +65,12 @@ export interface ScenarioResult extends ScenarioInput {
   estimatedFirstPayment: number;
   incomeCommitment: number;
   downPaymentGap: number;
+  referencePaymentLimit: number;
+  estimatedSupportedFinancing: number;
+  indicativeRequiredDownPayment: number;
+  feasibility: ScenarioFeasibility;
+  feasibilityLabel: string;
+  severityReasons: string[];
   level: ScenarioLevel;
   levelLabel: string;
   levelSummary: string;
@@ -91,8 +104,10 @@ export interface QuestionOption<T extends string> {
 }
 
 export const REFERENCE_CONTEXT = {
+  version: "2026-06",
   referenceDate: "2026-06-09",
   calculationMethod: "Primeira parcela estimada pelo sistema SAC em 360 meses",
+  termMonths: 360,
   annualRatePercent: 10.5,
   initialCostPercent: 4.5,
   downPaymentPercent: 20,
@@ -225,14 +240,87 @@ export function calculateScenario({
   const downPaymentPercent = propertyValue > 0 ? (consideredDownPayment / propertyValue) * 100 : 0;
   const financedValue = Math.max(propertyValue - consideredDownPayment, 0);
   const initialCosts = propertyValue * (REFERENCE_CONTEXT.initialCostPercent / 100);
+  const firstPaymentFactor =
+    1 / REFERENCE_CONTEXT.termMonths +
+    REFERENCE_CONTEXT.annualRatePercent / 100 / 12;
   const estimatedFirstPayment =
-    financedValue / 360 + financedValue * (REFERENCE_CONTEXT.annualRatePercent / 100 / 12);
+    financedValue * firstPaymentFactor;
   const incomeCommitment = monthlyIncome > 0 ? (estimatedFirstPayment / monthlyIncome) * 100 : 0;
+  const referencePaymentLimit =
+    Math.max(monthlyIncome, 0) * (REFERENCE_CONTEXT.incomeCommitmentPercent / 100);
+  const estimatedSupportedFinancing =
+    firstPaymentFactor > 0 ? referencePaymentLimit / firstPaymentFactor : 0;
+  const indicativeRequiredDownPayment = Math.max(
+    propertyValue - estimatedSupportedFinancing,
+    0
+  );
   const referenceDownPayment = propertyValue * (REFERENCE_CONTEXT.downPaymentPercent / 100);
   const downPaymentGap = Math.max(referenceDownPayment - consideredDownPayment, 0);
 
+  let feasibility: ScenarioFeasibility = "within_reference";
+  if (
+    !Number.isFinite(propertyValue) ||
+    !Number.isFinite(downPayment) ||
+    !Number.isFinite(monthlyIncome) ||
+    propertyValue <= 0 ||
+    downPayment < 0 ||
+    monthlyIncome <= 0
+  ) {
+    feasibility = "invalid";
+  } else if (financedValue === 0) {
+    feasibility = "no_financing_needed";
+  } else if (
+    incomeCommitment > 100 ||
+    estimatedSupportedFinancing < financedValue * 0.25
+  ) {
+    feasibility = "severely_incompatible";
+  } else if (
+    incomeCommitment > 40 ||
+    estimatedSupportedFinancing < financedValue * 0.75
+  ) {
+    feasibility = "needs_major_adjustment";
+  } else if (
+    incomeCommitment > REFERENCE_CONTEXT.incomeCommitmentPercent ||
+    downPaymentPercent < REFERENCE_CONTEXT.downPaymentPercent
+  ) {
+    feasibility = "needs_confirmation";
+  }
+
+  const feasibilityLabels: Record<ScenarioFeasibility, string> = {
+    invalid: "Dados insuficientes para avaliação",
+    no_financing_needed: "Cenário sem financiamento estimado",
+    severely_incompatible: "Cenário incompatível com a referência atual",
+    needs_major_adjustment: "Cenário que exige grande ajuste",
+    needs_confirmation: "Cenário que precisa de confirmação",
+    within_reference: "Cenário dentro das referências educativas",
+  };
+
+  const severityReasons: string[] = [];
+  if (financedValue > 0 && estimatedFirstPayment > monthlyIncome) {
+    severityReasons.push("A primeira parcela estimada supera a renda mensal informada.");
+  }
+  if (
+    financedValue > 0 &&
+    estimatedSupportedFinancing < financedValue
+  ) {
+    severityReasons.push(
+      "O financiamento informado supera a capacidade estimada pela referência educativa."
+    );
+  }
+  if (consideredDownPayment === 0 && financedValue > 0) {
+    severityReasons.push("Não foi informada entrada para reduzir o valor financiado.");
+  } else if (downPaymentGap > 0) {
+    severityReasons.push(
+      "A entrada está abaixo da referência educativa usada pelo diagnóstico."
+    );
+  }
+
   let level: ScenarioLevel = "busca";
-  if (downPaymentPercent < 10 || incomeCommitment > 40) {
+  if (
+    feasibility === "severely_incompatible" ||
+    feasibility === "needs_major_adjustment" ||
+    downPaymentPercent < 10
+  ) {
     level = "exploratorio";
   } else if (downPaymentPercent < 20 || incomeCommitment > REFERENCE_CONTEXT.incomeCommitmentPercent) {
     level = "preparacao";
@@ -288,6 +376,12 @@ export function calculateScenario({
     estimatedFirstPayment,
     incomeCommitment,
     downPaymentGap,
+    referencePaymentLimit,
+    estimatedSupportedFinancing,
+    indicativeRequiredDownPayment,
+    feasibility,
+    feasibilityLabel: feasibilityLabels[feasibility],
+    severityReasons,
     level,
     levelLabel: levelContent[level].label,
     levelSummary: levelContent[level].summary,
@@ -465,8 +559,13 @@ export function classifyRecommendation(
 ): RecommendationClass {
   const { moment, mainNeed, supportPreference } = answers;
 
+  if (
+    result.feasibility === "severely_incompatible" ||
+    result.feasibility === "needs_major_adjustment"
+  ) {
+    return "ajuste_orcamento";
+  }
   if (moment === "negociando") return "negociacao";
-  if (result.incomeCommitment > 40) return "ajuste_orcamento";
   if (mainNeed === "formar_entrada" || result.downPaymentPercent < 10) return "formacao_entrada";
   if (supportPreference === "acompanhamento" || mainNeed === "busca_visitas") return "acompanhamento";
 

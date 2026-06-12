@@ -64,7 +64,7 @@ function miniReportApiPlugin(): Plugin {
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  for (const name of ["GROQ_API_KEY", "GROQ_MODEL", "GROQ_DEBUG"]) {
+  for (const name of ["GROQ_API_KEY", "GROQ_MODEL"]) {
     if (env[name]) process.env[name] = env[name];
   }
 

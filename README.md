@@ -46,37 +46,17 @@ Crie `.env` a partir de `.env.example`:
 ```env
 GROQ_API_KEY=
 GROQ_MODEL=openai/gpt-oss-120b
-GROQ_DEBUG=0
-VITE_REPORT_DEBUG=0
 ```
 
 `GROQ_API_KEY` é uma variável exclusiva do servidor. Nunca use o prefixo `VITE_`.
 
-Para auditar temporariamente a origem dos relatórios no navegador, use
-`VITE_REPORT_DEBUG=1`. A página exibirá origem, ID da requisição, duração e motivo
-do fallback. Em desenvolvimento com Vite, essa identificação já aparece automaticamente.
-
 O backend registra eventos JSON `mini_report_success` e `mini_report_fallback`.
-Use o `requestId` exibido na página ou no console do navegador para localizar a mesma
-requisição nos logs do terminal ou da função na Vercel. `GROQ_DEBUG=1` acrescenta
-diagnóstico de guardrails nos logs do servidor e não deve ser necessário no uso normal.
+Use o `requestId` registrado no console do navegador para correlacionar a requisição
+com os logs do terminal ou da função na Vercel. O backend não retorna prompt, payload,
+resposta bruta ou raciocínio do provedor ao navegador.
 
-### Inspetor temporário da Groq
-
-Em desenvolvimento, o relatório exibe um painel com o histórico das últimas 10 chamadas:
-entrada recebida, cenário calculado, prompt/payload enviado, resposta da Groq, tokens,
-validação estrutural, guardrails e resultado entregue. O header de autorização sempre
-aparece como `[REDACTED]`.
-
-Esse recurso é temporário. Para localizá-lo e removê-lo, procure por:
-
-```text
-TEMP_GROQ_DEBUG
-```
-
-As marcações estão concentradas em `api/mini-relatorio.ts`,
-`src/lib/inteligenciaReport.ts` e
-`src/components/terceiraInteligencia/AdaptiveMiniReport.tsx`.
+O rate limit em memória protege o desenvolvimento e cada instância isolada. Em produção,
+configure também rate limiting distribuído no firewall ou gateway da plataforma.
 
 ## Backend
 
